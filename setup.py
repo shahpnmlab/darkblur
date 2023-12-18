@@ -28,7 +28,7 @@ setup(name='darkblur',
       include_package_data=True,
       entry_points={
           'console_scripts': [
-              'darkblur=main:darkblur'
+              'darkblur=darkblur:main'
           ],
       },
       zip_safe=False
