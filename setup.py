@@ -27,7 +27,9 @@ setup(name='darkblur',
       dependency_links=dependency_links,
       include_package_data=True,
       entry_points={
-          'console_scripts': ['darkblur=darkblur.main:analyse_images'],
+          'console_scripts': [
+              'darkblur=darkblur.main:darkblur'
+          ],
       },
       zip_safe=False
       )
