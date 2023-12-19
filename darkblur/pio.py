@@ -41,7 +41,7 @@ def modify_unselect_filter(file_path, condition):
 
     # Step 2 and 3: Find the element and modify the attribute
     if 'UnselectFilter' in root.attrib:
-        root.set('UnselectFilter', str(condition))
+        root.set('UnselectManual', str(condition))
 
     # modified_xml_str = ET.tostring(root, encoding='unicode')
     # print(modified_xml_str)

@@ -71,8 +71,8 @@ def is_image_blurry(mrc_path: PathLike, xml_path: PathLike = None, crop_size=256
         - If the image is blurry, the function modifies the corresponding XML file and returns the path of the blurry MRC file.
         - The function processes all MRC files in the given directory.
         """
-    t = 0.8
-    T = 1.2
+    t = 0.75
+    T = 1.15
 
     m = pio.read_mrc(mrc_path)
     gradient_change_map = transform_im_data(m, crop_size=crop_size, threshold_for_peak_finding=0.1)
