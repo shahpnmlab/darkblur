@@ -10,44 +10,33 @@ import darkblur.calc as calc
 import darkblur.pio as pio
 
 
-def is_image_dark(mrc_path: PathLike, xml_path: PathLike = None,
-                  intensity_threshold: float = 0.2,
-                  dark_threshold: float = 50) -> bool:
-    """
-    Determines if an MRC format image is dark based on specified intensity thresholds.
-
-    This function reads an image in MRC format, normalizes the pixel intensity values, and calculates the histogram
-    of these normalized values. It then assesses the percentage of pixels that fall below a specified intensity
-    threshold and determines if the image is dark based on this percentage exceeding a certain threshold.
-
-    Parameters:
-    mrc_path (Union[str, Path]): The file path to the MRC image.
-    xml_path (Union[str, Path], optional): The file path to the corresponding XML file.
-    intensity_threshold (float, optional): The threshold for pixel intensity, normalized between 0 and 1.
-                                           Default is 0.2.
-    dark_threshold (float, optional): The percentage threshold of low-intensity pixels used to classify
-                                      an image as dark. Default is 50.
-
-    NOTE:
-            - The function assumes pixel intensity values are normalized between 0 and 1.
-    Returns:
-    bool: True if the image is considered dark, False otherwise.
-    Example:
-    is_dark = is_image_dark("/path/to/image.mrc")
-    print(is_dark)
-    """
-
-    im_data = pio.read_mrc(mrc_path)
-    normalised_im_data = calc.normalise(im_data=im_data)
-    hist = np.histogram(normalised_im_data, bins=np.arange(0, 1.1, 0.1))[0]
-    low_intensity_percentage = (np.sum(hist[:int(intensity_threshold * 10)]) / hist.sum()) * 100
-    if low_intensity_percentage > dark_threshold:
-        pio.modify_unselect_filter(xml_path, condition="True")
+def is_image_dark(mrc_path: PathLike, darkness_threshold: float = 0.65) -> bool:
+    img_data = pio.read_mrc(mrc_path)
+    norm = cv2.normalize(img_data, None, 0, 255, cv2.NORM_MINMAX).astype("uint8")
+    hist = cv2.calcHist([norm], [0], None, [256], [0, 256]).flatten()
+    dark_threshold_bins = 20
+    dark_pixels = sum(hist[:dark_threshold_bins])
+    total_pixels = img_data.size
+    if (dark_pixels / total_pixels) > darkness_threshold:
         return True
     return False
 
 
-def is_image_blurry(mrc_path: PathLike, xml_path: PathLike = None, crop_size=256) -> bool:
+def is_image_obstructed(mrc_path: PathLike, coverage_percentage_threshold: float = 0.15) -> bool:
+    image = pio.read_mrc(mrc_path)
+    mask, largest_contour = detect_obstructions(image)
+    # Calculate the area of the largest black region
+    largest_area = cv2.contourArea(largest_contour)
+    # Calculate the total image area
+    total_area = image.shape[0] * image.shape[1]
+    # Calculate the percentage of the image that the largest black region covers
+    coverage_percentage = largest_area / total_area
+    if coverage_percentage > coverage_percentage_threshold:
+        return True
+    return False
+
+
+def is_image_blurry(mrc_path: PathLike, crop_size=256) -> bool:
     """
         Analyzes electron microscopy images to determine if an image is blurry and modifies an associated XML file if it is.
 
@@ -71,8 +60,8 @@ def is_image_blurry(mrc_path: PathLike, xml_path: PathLike = None, crop_size=256
         - If the image is blurry, the function modifies the corresponding XML file and returns the path of the blurry MRC file.
         - The function processes all MRC files in the given directory.
         """
-    t = 0.75
-    T = 1.15
+    t = 0.85
+    T = 1.10
 
     m = pio.read_mrc(mrc_path)
     gradient_change_map = transform_im_data(m, crop_size=crop_size, threshold_for_peak_finding=0.1)
@@ -89,7 +78,7 @@ def is_image_blurry(mrc_path: PathLike, xml_path: PathLike = None, crop_size=256
         minor_axis = min(axes)
         ratio = minor_axis / major_axis
         if not t <= ratio <= T:
-            pio.modify_unselect_filter(xml_path, condition="True")
+            #pio.modify_unselect_filter(xml_path, condition="True")
             return True
         return False
 
@@ -110,3 +99,23 @@ def transform_im_data(im_data, crop_size=256, threshold_for_peak_finding=0.1):
 def match_image_fname_to_xml(im_name, xml_name):
     if im_name.stem in xml_name.stem:
         return xml_name
+
+
+def detect_obstructions(image):
+    # Normalize the image to 8-bit
+    image_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype('uint8')
+    # Apply a Gaussian blur
+    image_blur = cv2.GaussianBlur(image_normalized, (5, 5), sigmaX=5, sigmaY=5)
+    # Apply OTSU thresholding to get the binary image
+    _, binary_image = cv2.threshold(image_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Morphological closing to close small holes or gaps
+    kernel = np.ones((5, 5), np.uint8)
+    closing = cv2.morphologyEx(binary_image, cv2.MORPH_CLOSE, kernel)
+    # Find contours
+    contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Filter contours by area - keeping the largest contour
+    largest_contour = max(contours, key=cv2.contourArea)
+    # Create a mask for the largest contour
+    mask = np.zeros_like(image)
+    cv2.drawContours(mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
+    return mask, largest_contour

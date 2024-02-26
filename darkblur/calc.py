@@ -1,126 +1,105 @@
-import math
-from typing import Tuple
+from pathlib import Path
 
+import cv2
 import numpy as np
-from scipy import constants as C
+import pylab as plt
+from pio import read_mrc
+from skimage.transform import hough_line, hough_line_peaks
+from scipy.ndimage import gaussian_gradient_magnitude
 
 
-def normalise(im_data):
-    min_values = np.min(im_data)
-    max_values = np.max(im_data)
-
-    normalized_stack = (im_data - min_values) / (max_values - min_values)
-    return normalized_stack
 
 
-def construct_fftfreq_grid_2d(image_shape: Tuple[int, int], rfft: bool,
-                              spacing: float | Tuple[float, float] = 1) -> np.ndarray:
-    """
-    Constructs a 2D grid of Fourier frequencies with spacing.
 
-    Parameters:
-    image_shape (Tuple[int, int]): The shape of the image (height, width).
-    rfft (bool): If True, construct the grid for a real FFT, otherwise for a complex FFT.
-    spacing (float | Tuple[float, float]): Sample spacing in the grid.
-
-    Returns:
-    np.ndarray: A 2D grid of Fourier frequencies.
-    """
-    dh, dw = spacing if isinstance(spacing, (tuple, list)) else (spacing, spacing)
-    h, w = image_shape
-    freq_y = np.fft.fftfreq(h, d=dh)[:, None]  # Column vector of y frequencies
-    freq_x = (np.fft.rfftfreq(w, d=dw) if rfft else np.fft.fftfreq(w, d=dw))[None, :]  # Row vector of x frequencies
-
-    return np.stack(np.meshgrid(freq_y, freq_x, indexing='ij'), axis=-1)  # Shape: (h, w, 2)
-
-
-def calculate_relativistic_electron_wavelength(energy: float):
-    """Calculate the relativistic electron wavelength in SI units.
-
-    For derivation see:
-    1.  Kirkland, E. J. Advanced Computing in Electron Microscopy.
-        (Springer International Publishing, 2020). doi:10.1007/978-3-030-33260-0.
-
-    2.  https://en.wikipedia.org/wiki/Electron_diffraction#Relativistic_theory
-
-    Parameters
-    ----------
-    energy: float
-        acceleration potential in volts.
-
-    Returns
-    -------
-    wavelength: float
-        relativistic wavelength of the electron in meters.
-    """
-    h = C.Planck
-    c = C.speed_of_light
-    m0 = C.electron_mass
-    e = C.elementary_charge
-    V = energy
-    eV = e * V
-
-    numerator = h * c
-    denominator = math.sqrt(eV * (2 * m0 * c ** 2 + eV))
-    return numerator / denominator
+def detect_obstructions(image):
+    # Normalize the image to 8-bit
+    image_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype('uint8')
+    # Apply a Gaussian blur
+    image_blur = cv2.GaussianBlur(image_normalized, (5, 5), sigmaX=5, sigmaY=5)
+    # Apply OTSU thresholding to get the binary image
+    _, binary_image = cv2.threshold(image_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Morphological closing to close small holes or gaps
+    kernel = np.ones((5, 5), np.uint8)
+    closing = cv2.morphologyEx(binary_image, cv2.MORPH_CLOSE, kernel)
+    # Find contours
+    contours, _ = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Filter contours by area - keeping the largest contour
+    largest_contour = max(contours, key=cv2.contourArea)
+    # Create a mask for the largest contour
+    mask = np.zeros_like(image)
+    cv2.drawContours(mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
+    return mask, largest_contour
 
 
-def calculate_ctf(
-        defocus: float | np.ndarray,
-        astigmatism: float | np.ndarray,
-        astigmatism_angle: float | np.ndarray,
-        voltage: float,
-        spherical_aberration: float,
-        amplitude_contrast: float,
-        b_factor: float | np.ndarray,
-        phase_shift: float | np.ndarray,
-        pixel_size: float,
-        image_shape: Tuple[int, int],
-        rfft: bool,
-        fftshift: bool,
-):
-    # Unit conversions
-    defocus = np.atleast_1d(np.asarray(defocus, dtype=float)) * 1e4
-    astigmatism = np.atleast_1d(np.asarray(astigmatism, dtype=float)) * 1e4
-    astigmatism_angle = np.atleast_1d(np.asarray(astigmatism_angle, dtype=float)) * (C.pi / 180)
-    pixel_size = np.atleast_1d(np.asarray(pixel_size))
-    voltage = np.atleast_1d(np.asarray(voltage, dtype=float)) * 1e3
-    spherical_aberration = np.atleast_1d(np.asarray(spherical_aberration, dtype=float)) * 1e7
 
-    defocus_u = defocus + astigmatism
-    defocus_v = defocus - astigmatism
-    _lambda = calculate_relativistic_electron_wavelength(voltage) * 1e10
-    k1 = -C.pi * _lambda
-    k2 = C.pi / 2 * spherical_aberration * _lambda ** 3
-    k3 = np.deg2rad(phase_shift)
-    k4 = -b_factor / 4
-    k5 = np.arctan(amplitude_contrast / np.sqrt(1 - amplitude_contrast ** 2))
 
-    # Construct 2D frequency grids and rescale
-    fftfreq_grid = construct_fftfreq_grid_2d(image_shape=image_shape, rfft=rfft) / pixel_size.reshape(-1, 1, 1, 1)
-    fftfreq_grid_squared = fftfreq_grid ** 2
+def analyze_motion_blur_fft(image_path):
+    image = read_mrc(image_path)
+    image_normalized = cv2.normalize(image, None, 0, 255, cv2.NORM_MINMAX).astype('uint8')
+    # Load image and convert to grayscale
 
-    # Astigmatism calculations
-    c = np.cos(astigmatism_angle)
-    c2 = c ** 2
-    s = np.sin(astigmatism_angle)
-    s2 = s ** 2
+    # Apply FFT, shift the DC component to the center, and crop to 256x256
+    f_transform = np.fft.fft2(image_normalized)
+    f_shift = np.fft.fftshift(f_transform)
+    center = np.array(f_shift.shape) // 2
+    cropped_f_shift = f_shift[center[0] - 128:center[0] + 128, center[1] - 128:center[1] + 128]
 
-    yy2, xx2 = np.moveaxis(fftfreq_grid_squared, -1, 0)
-    xy = np.prod(fftfreq_grid, axis=-1)
-    n4 = np.sum(fftfreq_grid_squared, axis=-1) ** 2
+    # Calculate the magnitude spectrum
+    magnitude_spectrum = 20 * np.log(np.abs(cropped_f_shift) + 1)  # Added 1 to avoid log(0)
 
-    Axx = c2 * defocus_u + s2 * defocus_v
-    Axx_x2 = Axx[..., np.newaxis, np.newaxis] * xx2
-    Axy = c * s * (defocus_u - defocus_v)
-    Axy_xy = Axy[..., np.newaxis, np.newaxis] * xy
-    Ayy = s2 * defocus_u + c2 * defocus_v
-    Ayy_y2 = Ayy[..., np.newaxis, np.newaxis] * yy2
+    # Detect lines using Hough Transform
+    tested_angles = np.linspace(-np.pi / 2, np.pi / 2, 360)
+    ggm = gaussian_gradient_magnitude(magnitude_spectrum, sigma=5)
+    h, theta, d = hough_line(ggm, theta=tested_angles)
+    _, angles, dists = hough_line_peaks(h, theta, d)
 
-    # Calculate CTF
-    ctf = -np.sin(k1 * (Axx_x2 + (2 * Axy_xy) + Ayy_y2) + k2 * n4 - k3 - k5)
-    if k4 > 0:
-        ctf *= np.exp(k4 * n4)
-    if fftshift:
-        ctf = np.fft.fftshift(ctf, axes=(-2, -1))
-    return ctf
+
+    # Visualize results
+    plt.figure(figsize=(10, 4))
+
+    plt.subplot(1, 3, 1)
+    plt.imshow(magnitude_spectrum, cmap='gray')
+    plt.title('Cropped Magnitude Spectrum')
+    for angle, dist in zip(angles, dists):
+        (x0, y0) = dist * np.array([np.cos(angle), np.sin(angle)])
+        plt.axline((x0, y0), slope=np.tan(angle + np.pi / 2))
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(ggm, cmap='gray')
+    plt.title('Gaussian Gradient Magnitude')
+
+    plt.subplot(1, 3, 3)
+    plt.plot(np.sum(magnitude_spectrum, axis=0), label='Horizontal Energy Profile')
+    plt.plot(np.sum(magnitude_spectrum, axis=1), label='Vertical Energy Profile')
+    plt.legend()
+    plt.title('Energy Spread Estimation')
+
+    plt.tight_layout()
+    plt.show()
+
+    # Interpretation of results needed here
+    #print("Detected angles (radians):", angles)
+    #print("Energy spread can be inferred from the profiles.")
+#
+# pth = Path("/Users/ps/data/wip/darkblur/images/dark/").glob("*.mrc")
+# files = list(pth)
+# f = files[0]
+# print(f)
+# analyze_motion_blur_fft(f)
+# """
+# # This is for the dark-blurry test
+# pth = Path("/Users/ps/data/wip/darkblur/images/dark/").glob("*.mrc")
+# files = list(pth)
+# not_dark = [f for f in files if not is_frame_dark(f)]
+# not_obstructed = [f for f in not_dark if not is_frame_obstructed(f)]
+# total = len(files)
+# dark_count = total - len(not_dark)
+# obstructed_count = len(not_dark) - len(not_obstructed)
+#
+# # Printing the file names that are neither dark nor obstructed
+# for f in not_obstructed:
+#     print(f.name)
+#
+# # Print the results
+# print(f"{dark_count}/{total} are dark")
+# print(f"{obstructed_count}/{len(not_dark)} are obstructed")
